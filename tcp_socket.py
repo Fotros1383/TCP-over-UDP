@@ -1,11 +1,8 @@
 import socket, queue, time, random
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from packet import Packet
 from connection import Connection
-from settings import get_current_time, PacketType, State,\
-    BACKLOG, BUFFER_SIZE, TIMEOUT
-
-
+from settings import get_current_time, PacketType, State, BACKLOG, BUFFER_SIZE, TIMEOUT
 
 
 class TCP_Socket:
@@ -47,6 +44,7 @@ class TCP_Socket:
             raise Exception("Socket must be bound before listen.")
         
         self.listening = True
+        self.running = True
         self.state = State.LISTEN
         self.backlog = backlog
         self.accept_queue = queue.Queue(maxsize=backlog)
@@ -58,7 +56,7 @@ class TCP_Socket:
 
     def _server_listen_thread(self):
 
-        while self.listening:
+        while self.listening and self.running:
             try:
                 data, addr = self.sock.recvfrom(BUFFER_SIZE)
                 packet = Packet.from_bytes(data)
@@ -66,22 +64,39 @@ class TCP_Socket:
                 if packet is None:
                     continue
 
-                print(f"[{get_current_time()}]  A packet recived from {addr} \n {packet}")
+                print(f"[{get_current_time()}]  A packet recived from {addr}")
+                print(packet)
+
                 self._handle_packet(packet, addr)
+
             except Exception as e:
                 print(f"[{get_current_time()}]  Error in listening : {e}")    
         
     def _handle_packet(self, packet:Packet, addr):
 
-        if packet.has_flag(PacketType.SYN):
+        if packet.has_flag(PacketType.SYN) and addr not in self.connections:
             self._handle_SYN_packet(packet, addr)
 
         elif addr in self.connections:
-            conn = self.connections[addr]
-            self._handle_connection_packet(conn, packet, addr)
+
+            conn:Connection = self.connections[addr]
+            
+            if conn.state == State.SYN_RECIEVED and packet.has_flag(PacketType.ACK) and packet.ack_num == conn.seq_num+1:
+                conn.state = State.ESTABLISHED
+                conn.seq_num += 1
+                conn.expected_seq_num = conn.ack_num  
+                conn.start_management_thread() 
+
+                with self.lock:
+                    self.accept_queue.put(conn)
+                
+                print(f"[{get_current_time()}] Connection established with {addr}")
+            
+            elif conn.state == State.ESTABLISHED:
+                conn.handle_packet(packet)
 
         else:
-            print("invalid packet")
+            print("invalid packet - sending RST")
             self._send_RST_packet(packet, addr)
 
     def _handle_SYN_packet(self, packet:Packet, addr):
@@ -92,6 +107,7 @@ class TCP_Socket:
         conn = Connection(self.local_addr, addr, self.sock)
         conn.state = State.SYN_RECIEVED
         conn.ack_num = packet.seq_num + 1
+        conn.expected_seq_num = packet.seq_num + 1
 
         SYN_ACK_packet = Packet(
             src_port=self.local_addr[1],
@@ -102,23 +118,16 @@ class TCP_Socket:
         )
 
         conn.send_packet(SYN_ACK_packet)
-
         self.connections[addr] = conn
         print("recive syn send syn ack")
 
-    def _handle_connection_packet(self, conn:Connection, packet:Packet, addr):
-        if conn.state == State.SYN_RECIEVED and packet.has_flag(PacketType.ACK) and packet.ack_num == conn.seq_num+1:
-            conn.state = State.ESTABLISHED
-            conn.seq_num += 1
-            with self.lock:
-                self.accept_queue.put(conn)
-
     def _send_RST_packet(self, packet:Packet, addr):
+
         RST_packet = Packet(
             src_port=self.local_addr[1],
             dest_port=packet.src_port,
             seq_num=0,
-            ack_num=packet.seq_num+1,
+            ack_num=packet.seq_num + 1, 
             flags=PacketType.RST
         )
 
@@ -134,7 +143,7 @@ class TCP_Socket:
         while True:
             with self.lock:
                 if not self.accept_queue.empty():
-                    conn = self.accept_queue.get()
+                    conn:Connection = self.accept_queue.get()
                     return conn, conn.remote_addr
                 time.sleep(0.1)
 
@@ -148,6 +157,7 @@ class TCP_Socket:
 
         self.client_connection = Connection(self.local_addr, addr, self.sock)
         self.client_connection.state = State.SYN_SENT
+        self.state = State.SYN_SENT
 
         SYN_packet = Packet(
             src_port=self.local_addr[1],
@@ -160,15 +170,17 @@ class TCP_Socket:
         self.client_connection.send_packet(SYN_packet)
 
         self.listening = True
+        self.running = True
         self.listener_thread = Thread(target=self._client_listen_thread, daemon=True)
         self.listener_thread.start()
 
         start_time = time.time()
 
-        while self.client_connection.state != State.ESTABLISHED and (time.time()- start_time < TIMEOUT):
+        while self.client_connection.state != State.ESTABLISHED and (time.time() - start_time < TIMEOUT):
             time.sleep(0.1)
 
         if self.client_connection.state != State.ESTABLISHED:
+            self.listening = False
             raise Exception("connection timeout")
         
         print(f"connected to {addr}")
@@ -182,11 +194,15 @@ class TCP_Socket:
                 if not packet:
                     continue
 
-                print(f"client recieved:{packet}")
+                print(f"[{get_current_time()}] Client received packet from {addr} :")
+                print(packet)
 
-                if packet.has_flag(PacketType.SYN_ACK) and packet.ack_num == self.client_connection.seq_num+1:
+                if packet.has_flag(PacketType.SYN_ACK) and self.client_connection.state == State.SYN_SENT and\
+                    packet.ack_num == self.client_connection.seq_num+1:
+
                     self.client_connection.ack_num = packet.seq_num + 1
                     self.client_connection.seq_num += 1
+                    self.client_connection.expected_seq_num = packet.seq_num + 1
 
                     ACK_packet = Packet(
                         src_port=self.local_addr[1],
@@ -198,19 +214,34 @@ class TCP_Socket:
 
                     self.client_connection.send_packet(ACK_packet)
                     self.client_connection.state = State.ESTABLISHED
+                    self.state = State.ESTABLISHED
+                    self.client_connection.start_management_thread()
 
-                    print("client connection established")
+                    print(f"[{get_current_time()}]  Client connection established")
+
+                elif self.client_connection.state == State.ESTABLISHED:
+
+                    self.client_connection.handle_packet(packet)
+
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"[{get_current_time()}]  Error in client listen thread : {e}")
                 break 
 
             
 
     def send(self, data):
-        pass
+        
+        if self.client_connection and self.client_connection.state == State.ESTABLISHED:
+            return self.client_connection.send(data)
+        else:
+            raise Exception("No established connection")
 
-    def recieve(self):
-        pass
+    def recieve(self, num_bytes = BUFFER_SIZE):
+
+        if self.client_connection and self.client_connection.state == State.ESTABLISHED:
+            return self.client_connection.receive(num_bytes)
+        else:
+            raise Exception("No established connection")
 
     def close(self):
         pass

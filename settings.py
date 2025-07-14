@@ -7,6 +7,11 @@ CLIENT_IP = "127.0.0.1"
 BACKLOG = 5
 BUFFER_SIZE = 4096
 TIMEOUT = 10
+MSS = 1024
+WINDOW_SIZE = 5
+RETRANSMIT_TIMEOUT = 3
+MAX_DUPLICATE_ACK_TO_RETRANSMITION = 3
+
 
 
 def get_current_time():
@@ -30,3 +35,14 @@ class State(Enum):
     SYN_RECIEVED = 2
     SYN_SENT = 3
     ESTABLISHED = 4
+    FIN_WAIT_1 = 5
+    FIN_WAIT_2 = 6
+    CLOSE_WAIT = 7
+    CLOSING = 8
+    LAST_ACK = 9
+    TIME_WAIT = 10
+
+
+
+
+
