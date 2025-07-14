@@ -244,4 +244,56 @@ class TCP_Socket:
             raise Exception("No established connection")
 
     def close(self):
-        pass
+
+        if self.is_server:
+
+            print(f"[{get_current_time()}] Closing server socket")
+            
+            self.listening = False
+            self.running = False
+            self.state = State.CLOSED
+            
+            if self.accept_queue:
+                print(f"[{get_current_time()}] Closing connections in accept queue...")
+                while not self.accept_queue.empty():
+                    try:
+                        conn:Connection = self.accept_queue.get_nowait()
+                        conn.close()
+                    except:
+                        break
+
+            for addr, conn in self.connections.items():
+                print(f"[{get_current_time()}] Closing connection with {addr}")
+                conn.close()
+
+            self.connections.clear()
+
+            # if self.sock:
+            #     self.sock.close()
+            #     print(f"[{get_current_time()}] Server socket closed")
+
+            if self.listener_thread and self.listener_thread.is_alive():
+                self.listener_thread.join(timeout=1.0)
+
+            print(f"[{get_current_time()}] Server socket closed")
+
+        else:
+
+            print(f"[{get_current_time()}] Closing client socket")
+            
+            self.listening = False
+            self.running = False
+            self.state = State.CLOSED
+
+            if self.client_connection and self.client_connection.state == State.ESTABLISHED:
+                self.client_connection.close()    
+   
+            if self.listener_thread and self.listener_thread.is_alive():
+                self.listener_thread.join(timeout=1.0)
+                
+
+
+            # if self.sock:
+            #     self.sock.close()
+
+            print(f"[{get_current_time()}] Client socket closed")

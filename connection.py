@@ -1,5 +1,5 @@
 from settings import State, PacketType, get_current_time, WINDOW_SIZE, MSS, RETRANSMIT_TIMEOUT,\
-    MAX_DUPLICATE_ACK_TO_RETRANSMITION, BUFFER_SIZE
+    MAX_DUPLICATE_ACK_TO_RETRANSMITION, BUFFER_SIZE, TIMEOUT
 
 from packet import Packet
 from threading import Thread, Lock, Event
@@ -123,10 +123,15 @@ class Connection:
         
         if packet.has_flag(PacketType.DATA):
             self._handle_DATA_packet(packet)
+
         elif packet.has_flag(PacketType.ACK):
             self._handle_ACK_packet(packet)
+
         elif packet.has_flag(PacketType.RST):
             self._handle_RST_packet(packet)
+
+        elif packet.has_flag(PacketType.FIN):
+            self._handle_FIN_packet(packet)
 
     def _handle_DATA_packet(self, packet:Packet):
 
@@ -176,6 +181,27 @@ class Connection:
         with self.send_lock:
 
             ack_num = packet.ack_num
+
+            if self.state == State.FIN_WAIT_1:
+                if ack_num == self.next_seq_num:
+                    self.state = State.FIN_WAIT_2
+                    print(f"[{get_current_time()}] ACK for FIN received, state: FIN_WAIT_2")
+        
+            elif self.state == State.LAST_ACK:
+                if ack_num == self.next_seq_num:
+                    self.state = State.CLOSED
+                    print(f"[{get_current_time()}] Final ACK received, connection closed")
+        
+            elif self.state == State.CLOSING:
+                if ack_num == self.next_seq_num:
+                    self.state = State.TIME_WAIT
+                    print(f"[{get_current_time()}] ACK in CLOSING state, entering TIME_WAIT")
+                
+                    def time_wait_timer():
+                        time.sleep(2 * TIMEOUT)  
+                        self.state = State.CLOSED
+                
+                    Thread(target=time_wait_timer, daemon=True).start()
             
             if ack_num == self.last_ack_received:   
 
@@ -216,6 +242,45 @@ class Connection:
         print(f"[{get_current_time()}]  RST received, closing connection")
         self.state = State.CLOSED
         self.running = False
+
+    def _handle_FIN_packet(self, packet:Packet):
+        print(f"[{get_current_time()}] FIN received from {self.remote_addr}")
+        
+        if self.state == State.ESTABLISHED:
+
+            self._send_ACK(packet.seq_num + 1)
+            self.expected_seq_num = packet.seq_num + 1
+            self.state = State.CLOSE_WAIT
+            
+            FIN_packet = Packet(
+                src_port=self.local_addr[1],
+                dest_port=self.remote_addr[1],
+                seq_num=self.next_seq_num,
+                ack_num=self.ack_num,
+                flags=PacketType.FIN
+            )
+            
+            self.send_packet(FIN_packet)
+            self.next_seq_num += 1
+            self.state = State.LAST_ACK
+            
+        elif self.state == State.FIN_WAIT_1:
+        
+            self._send_ACK(packet.seq_num + 1)
+            self.expected_seq_num = packet.seq_num + 1
+            self.state = State.CLOSING
+            
+        elif self.state == State.FIN_WAIT_2:
+
+            self._send_ACK(packet.seq_num + 1)
+            self.expected_seq_num = packet.seq_num + 1
+            self.state = State.TIME_WAIT
+            
+            def time_wait_timer():
+                time.sleep(2 * TIMEOUT)  
+                self.state = State.CLOSED
+            
+            Thread(target=time_wait_timer, daemon=True).start()
 
     def send(self, data):
 
@@ -284,9 +349,49 @@ class Connection:
         return received_data
                 
     def close(self):
-        pass
-
-
-
     
-    
+        if self.state == State.CLOSED:
+            return
+        
+        if self.state == State.ESTABLISHED:
+            print(f"[{get_current_time()}] Initiating connection termination")
+            
+            FIN_packet = Packet(
+                src_port=self.local_addr[1],
+                dest_port=self.remote_addr[1],
+                seq_num=self.next_seq_num,
+                ack_num=self.ack_num,
+                flags=PacketType.FIN
+            )
+            
+            self.send_packet(FIN_packet)
+            self.state = State.FIN_WAIT_1
+            self.next_seq_num += 1
+            
+            timeout_start = time.time()
+            while self.state != State.CLOSED and (time.time() - timeout_start) < TIMEOUT:
+                time.sleep(0.1)
+            
+            if self.state != State.CLOSED:
+                print(f"[{get_current_time()}] Termination timeout, forcing close")
+        
+        self.running = False
+        
+        if self.management_thread and self.management_thread.is_alive():
+            self.management_thread.join(timeout=1.0)
+        
+        with self.send_lock:
+            self.send_buffer.clear()
+            self.unacked_packets.clear()
+        
+        with self.receive_lock:
+            self.receive_buffer.clear()
+            self.app_receive_buffer.clear()
+        
+        self.state = State.CLOSED
+        print(f"[{get_current_time()}] Connection closed: {self.local_addr} <-> {self.remote_addr}")    
+
+
+
+        
+        
