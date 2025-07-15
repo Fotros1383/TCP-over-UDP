@@ -1,4 +1,4 @@
-from settings import State, PacketType, get_current_time, WINDOW_SIZE, MSS, RETRANSMIT_TIMEOUT,\
+from settings import State, PacketType, log_format, get_current_time, WINDOW_SIZE, MSS, RETRANSMIT_TIMEOUT,\
     MAX_DUPLICATE_ACK_TO_RETRANSMITION, BUFFER_SIZE, TIMEOUT
 
 from packet import Packet
@@ -55,11 +55,10 @@ class Connection:
             packet.dest_port = self.remote_addr[1]
             data = packet.to_bytes()
             self.socket.sendto(data, self.remote_addr)
-            print(f"[{get_current_time()}]  Sending packet to {self.remote_addr}")
-            print(packet)
+            print(log_format(f"Packet sent successfully to {self.remote_addr}\n{packet}"))
 
         except Exception as e:
-            print(f"[{get_current_time()}]  Error sending packet : {e}")
+            print(log_format(f"ERROR sending packet to {self.remote_addr} : {e}"))
 
     def start_management_thread(self):
 
@@ -67,7 +66,7 @@ class Connection:
             self.running = True
             self.management_thread = Thread(target=self._manager, daemon=True)
             self.management_thread.start()
-            print(f"[{get_current_time}]  Management thread started for connection {self.local_addr} <-> {self.remote_addr}")
+            print(log_format(f"Management thread started for connection {self.local_addr} <-> {self.remote_addr}"))
 
     def _manager(self):
 
@@ -78,8 +77,9 @@ class Connection:
                 time.sleep(0.1)
                 
             except Exception as e:
-                print(f"[{get_current_time()}] Error in management thread: {e}")
+                print(log_format(f"ERROR in management thread: {e}"))
                 break
+        print(log_format(f"Management thread stopping for {self.local_addr} <-> {self.remote_addr}"))
 
     def _handle_retransmition(self):
 
@@ -99,8 +99,14 @@ class Connection:
     def _handle_send_buffer(self):
 
         with self.send_lock:
+
+            initial_buffer_size = len(self.send_buffer)
+            packets_sent = 0
+
             while self.send_buffer and self.next_seq_num < self.send_base + self.window_size and len(self.unacked_packets) < self.window_size:
-            
+                
+                print(log_format(f"Window check: nest_seq={self.next_seq_num}, base={self.send_base}, window={self.window_size}"))
+
                 data = self.send_buffer.popleft()
                 
                 packet = Packet(
@@ -115,10 +121,12 @@ class Connection:
                 self.send_packet(packet)
                 self.unacked_packets[self.next_seq_num] = (packet, time.time())
                 self.next_seq_num += len(data)
-                
-                print(f"[{get_current_time()}] Sent data packet")
-                print(packet)   
-    
+                packets_sent += 1
+
+            if initial_buffer_size > 0:
+
+                print(log_format(f"Send buffer processed: {packets_sent} packets sent, {len(self.send_buffer)} remaining in buffer"))
+   
     def handle_packet(self, packet:Packet):
         
         if packet.has_flag(PacketType.DATA):
@@ -155,7 +163,7 @@ class Connection:
                 
             else:
 
-                self._send_ACK(self.expected_seq_num)    # q
+                self._send_ACK(self.expected_seq_num)
 
     def _handle_buffered_packets(self):
 

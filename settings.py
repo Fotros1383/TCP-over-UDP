@@ -19,6 +19,12 @@ def get_current_time():
     formatted_time = now.strftime("%Y-%m-%d  %H:%M:%S")
     return formatted_time
 
+def log_format(log:str):
+
+    now = datetime.now()
+    formatted_time = now.strftime("%Y-%m-%d  %H:%M:%S")
+    return f"{formatted_time}  {log}"
+
 class PacketType(Enum):
 
     DATA = 0
