@@ -2,16 +2,16 @@ from enum import Enum
 from datetime import datetime
 
 SERVER_IP = "127.0.0.1"
-SERVER_PORT = 9500
+SERVER_PORT = 9000
 CLIENT_IP = "127.0.0.1"
 BACKLOG = 5
 BUFFER_SIZE = 4096
 TIMEOUT = 10
 MSS = 1024
-WINDOW_SIZE = 5
-RETRANSMIT_TIMEOUT = 3
+MSL = 50
+WINDOW_SIZE = 500
+RETRANSMIT_TIMEOUT = 10
 MAX_DUPLICATE_ACK_TO_RETRANSMITION = 3
-
 
 
 def get_current_time():
@@ -47,6 +47,9 @@ class State(Enum):
     CLOSING = 8
     LAST_ACK = 9
     TIME_WAIT = 10
+
+
+
 
 
 

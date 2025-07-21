@@ -11,7 +11,6 @@ class TCP_Socket:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.local_addr = None
-        self.remote_addr = None  
         self.is_server = is_server
         self.state = State.CLOSED
 
@@ -103,10 +102,11 @@ class TCP_Socket:
             conn:Connection = self.connections[addr]
             print(log_format(f"Processing packet from existing connection {addr} | Connection state: {conn.state.name}"))
                   
-            if conn.state == State.SYN_RECIEVED and packet.has_flag(PacketType.ACK) and packet.ack_num == conn.seq_num+1:
-                conn.state = State.ESTABLISHED
-                conn.seq_num += 1
-                conn.expected_seq_num = conn.ack_num  
+            if conn.state == State.SYN_RECIEVED and packet.has_flag(PacketType.ACK) and packet.ack_num == (conn.seq_num+1):
+                
+                conn.state = State.ESTABLISHED 
+                conn.next_seq_num = conn.seq_num + 1
+                conn.send_base = conn.next_seq_num 
                 conn.start_management_thread() 
 
                 with self.lock:
@@ -116,7 +116,9 @@ class TCP_Socket:
             
             elif conn.state == State.ESTABLISHED:
                 conn.handle_packet(packet)
-
+            
+            elif conn.state in [State.FIN_WAIT_1, State.FIN_WAIT_2, State.CLOSING, State.CLOSE_WAIT, State.LAST_ACK, State.TIME_WAIT]:
+                conn.handle_packet(packet)
         else:
             print(log_format(f"invalid packet - sending RST to {addr}"))
             self._send_RST_packet(packet, addr)
@@ -132,7 +134,7 @@ class TCP_Socket:
         conn = Connection(self.local_addr, addr, self.sock)
         conn.state = State.SYN_RECIEVED
         conn.ack_num = packet.seq_num + 1
-        conn.expected_seq_num = packet.seq_num + 1
+
 
         SYN_ACK_packet = Packet(
             src_port=self.local_addr[1],
@@ -145,6 +147,7 @@ class TCP_Socket:
         print(log_format(f"Sending SYN-ACK packet to {addr}"))
         conn.send_packet(SYN_ACK_packet)
 
+        conn.unacked_packets[conn.seq_num] = (SYN_ACK_packet, time.time())
         self.connections[addr] = conn
 
     def _send_RST_packet(self, packet:Packet, addr):
@@ -220,7 +223,7 @@ class TCP_Socket:
 
     def _client_listen_thread(self):
 
-        while self.listening and self.client_connection.state != State.ESTABLISHED:
+        while self.listening and self.running:
             try:
                 data, addr = self.sock.recvfrom(BUFFER_SIZE)
                 print(log_format(f"Packet received from {addr}"))
@@ -234,12 +237,11 @@ class TCP_Socket:
 
 
                 if packet.has_flag(PacketType.SYN_ACK) and self.client_connection.state == State.SYN_SENT and\
-                    packet.ack_num == self.client_connection.seq_num+1:
+                    packet.ack_num == self.client_connection.seq_num:
 
                     print(log_format("Valid SYN-ACK received"))
                     self.client_connection.ack_num = packet.seq_num + 1
-                    self.client_connection.seq_num += 1
-                    self.client_connection.expected_seq_num = packet.seq_num + 1
+                    self.client_connection.seq_num = packet.ack_num
 
                     ACK_packet = Packet(
                         src_port=self.local_addr[1],
@@ -291,8 +293,6 @@ class TCP_Socket:
 
             print(log_format(f" Closing server socket"))
             
-            self.listening = False
-            self.running = False
             self.state = State.CLOSED
             
             if self.accept_queue:
@@ -309,36 +309,31 @@ class TCP_Socket:
                 conn.close()
 
             self.connections.clear()
-            print(log_format("All connections closed"))
-
-            # if self.sock:
-            #     self.sock.close()
-            #     print(f"[{get_current_time()}] Server socket closed")
-
-            if self.listener_thread and self.listener_thread.is_alive():
-
-                print(log_format("Waiting for listener thread to stop..."))
-                self.listener_thread.join(timeout=1.0)
-
-            print(log_format(f"Server socket closed successfully"))
+            print(log_format("All server connections closed"))
 
         else:
 
             print(log_format(f"Closing client socket..."))
             
-            self.listening = False
-            self.running = False
             self.state = State.CLOSED
 
-            if self.client_connection and self.client_connection.state == State.ESTABLISHED:
+            if self.client_connection and self.client_connection.state != State.CLOSED:
                 print(log_format("Closing established client connection"))
-                self.client_connection.close()    
-   
-            if self.listener_thread and self.listener_thread.is_alive():
-                print(log_format("Waiting for listener thread to stop..."))
-                self.listener_thread.join(timeout=1.0)
-                
-            # if self.sock:
-            #     self.sock.close()
+                self.client_connection.close()
 
-            print(log_format(f"Client socket closed successfully"))
+            self.client_connection = None 
+
+        self.force_close()   
+
+    def force_close(self):
+        if self.listener_thread and self.listener_thread.is_alive():
+            print(log_format("Waiting for listener thread to stop..."))
+            self.listener_thread.join(timeout=1.0)
+                
+        self.listening = False
+        self.running = False
+        self.accept_queue = None
+        self.listener_thread = None
+
+        sock_type = "Server" if self.is_server else "Client"
+        print(log_format(f"{sock_type} socket closed successfully"))

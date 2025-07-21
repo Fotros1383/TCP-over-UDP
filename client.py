@@ -1,11 +1,38 @@
-from tcp_socket import TCP_Socket
-import settings
+import threading, time
 
-client = TCP_Socket()
+from tcp_socket import TCP_Socket
+from settings import SERVER_IP, SERVER_PORT
+
+
+def recieve(sock:TCP_Socket):
+    try:
+        while True:
+            data = sock.recieve().decode('utf-8')
+            print(data)
+    except:
+        return
+    
+client_socket = TCP_Socket()
+client_socket.connect((SERVER_IP,SERVER_PORT))
+
 try:
-    client.connect((settings.SERVER_IP, settings.SERVER_PORT))
-    print("Connected to server")
-except Exception as e:
-    print(f"clint error: {e}")
+    recieve_thread = threading.Thread(target=recieve, args=(client_socket,))
+    recieve_thread.start()
+
+    for i in range(1,5):
+        client_socket.send(f"message{i} from client")
+        time.sleep(5)
+
+    recieve_thread.join(timeout=100)
+    client_socket.close()
+except:
+    client_socket.force_close()
+
+
+
+
+
+
+
 
     
